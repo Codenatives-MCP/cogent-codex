@@ -4,13 +4,102 @@ This document provides testing instructions for all API endpoints.
 
 ## Prerequisites
 
-1. Server running at `http://localhost:8000`
-2. Valid `OPENAI_API_KEY` in `.env`
-3. Codex binary built and accessible
+### System Requirements
 
-Start the server:
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| **Rust** | 1.85+ (nightly) | Build Codex binary |
+| **Cargo** | (comes with Rust) | Rust package manager |
+| **Python** | 3.11+ | Run API bridge |
+| **OpenAI API Key** | - | Authentication for Codex |
+
+### 1. Install Rust (if not installed)
+
+**Linux/macOS:**
 ```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup install nightly
+rustup default nightly
+```
+
+**Windows:**
+Download and run [rustup-init.exe](https://rustup.rs/), then:
+```powershell
+rustup install nightly
+rustup default nightly
+```
+
+Verify:
+```bash
+rustc --version   # Should show 1.85+ or nightly
+cargo --version
+```
+
+### 2. Build Codex Binary
+
+```bash
+cd codex-rs
+cargo build --release
+```
+
+Binary location:
+- **Linux/macOS:** `codex-rs/target/release/codex`
+- **Windows:** `codex-rs/target/release/codex.exe`
+
+Verify:
+```bash
+./target/release/codex --version
+```
+
+### 3. Install Python Dependencies
+
+```bash
+cd codex-api-bridge
+
+# With uv (recommended)
+uv venv
+uv pip install -e .
+
+# Or with pip
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# .\.venv\Scripts\Activate.ps1  # Windows
+pip install -e .
+```
+
+### 4. Configure Environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```env
+# Required
+OPENAI_API_KEY=sk-your-key-here
+
+# Optional (if codex not in PATH)
+CODEX_BINARY_PATH=/path/to/codex-rs/target/release/codex
+
+# Development
+DEBUG=true
+LOG_LEVEL=INFO
+```
+
+### 5. Start the Server
+
+```bash
+cd codex-api-bridge
 python -m src.main
+```
+
+Expected output:
+```
+INFO - Starting Codex API Bridge
+INFO - OpenAI API key: configured
+INFO - Codex binary: codex 0.1.0 (abc1234)
+INFO - Uvicorn running on http://0.0.0.0:8000
 ```
 
 ---
