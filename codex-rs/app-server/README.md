@@ -15,6 +15,7 @@
 - [Skills](#skills)
 - [Apps](#apps)
 - [Auth endpoints](#auth-endpoints)
+- [Adding an experimental field](#adding-an-experimental-field)
 
 ## Protocol
 
@@ -103,7 +104,7 @@ Example (from OpenAI's official VSCode extension):
 - `config/read` — fetch the effective config on disk after resolving config layering.
 - `config/value/write` — write a single config key/value to the user's config.toml on disk.
 - `config/batchWrite` — apply multiple config edits atomically to the user's config.toml on disk.
-- `configRequirements/read` — fetch the loaded requirements allow-lists from `requirements.toml` and/or MDM (or `null` if none are configured).
+- `configRequirements/read` — fetch the loaded requirements allow-lists and `enforceResidency` from `requirements.toml` and/or MDM (or `null` if none are configured).
 
 ### Example: Start or resume a thread
 
@@ -444,12 +445,13 @@ Today both notifications carry an empty `items` array even when item events were
 
 - `userMessage` — `{id, content}` where `content` is a list of user inputs (`text`, `image`, or `localImage`).
 - `agentMessage` — `{id, text}` containing the accumulated agent reply.
+- `plan` — `{id, text}` emitted for plan-mode turns; plan text can stream via `item/plan/delta` (experimental).
 - `reasoning` — `{id, summary, content}` where `summary` holds streamed reasoning summaries (applicable for most OpenAI models) and `content` holds raw reasoning blocks (applicable for e.g. open source models).
 - `commandExecution` — `{id, command, cwd, status, commandActions, aggregatedOutput?, exitCode?, durationMs?}` for sandboxed commands; `status` is `inProgress`, `completed`, `failed`, or `declined`.
 - `fileChange` — `{id, changes, status}` describing proposed edits; `changes` list `{path, kind, diff}` and `status` is `inProgress`, `completed`, `failed`, or `declined`.
 - `mcpToolCall` — `{id, server, tool, status, arguments, result?, error?}` describing MCP calls; `status` is `inProgress`, `completed`, or `failed`.
 - `collabToolCall` — `{id, tool, status, senderThreadId, receiverThreadId?, newThreadId?, prompt?, agentStatus?}` describing collab tool calls (`spawn_agent`, `send_input`, `wait`, `close_agent`); `status` is `inProgress`, `completed`, or `failed`.
-- `webSearch` — `{id, query}` for a web search request issued by the agent.
+- `webSearch` — `{id, query, action?}` for a web search request issued by the agent; `action` mirrors the Responses API web_search action payload (`search`, `open_page`, `find_in_page`) and may be omitted until completion.
 - `imageView` — `{id, path}` emitted when the agent invokes the image viewer tool.
 - `enteredReviewMode` — `{id, review}` sent when the reviewer starts; `review` is a short user-facing label such as `"current changes"` or the requested target description.
 - `exitedReviewMode` — `{id, review}` emitted when the reviewer finishes; `review` is the full plain-text review (usually, overall notes plus bullet point findings).
@@ -466,6 +468,10 @@ There are additional item-specific events:
 #### agentMessage
 
 - `item/agentMessage/delta` — appends streamed text for the agent message; concatenate `delta` values for the same `itemId` in order to reconstruct the full reply.
+
+#### plan
+
+- `item/plan/delta` — streams proposed plan content for plan items (experimental); concatenate `delta` values for the same plan `itemId`. These deltas correspond to the `<proposed_plan>` block.
 
 #### reasoning
 
@@ -763,3 +769,31 @@ Field notes:
 - `usedPercent` is current usage within the OpenAI quota window.
 - `windowDurationMins` is the quota window length.
 - `resetsAt` is a Unix timestamp (seconds) for the next reset.
+
+## Adding an experimental field
+Use this checklist when introducing a field/method that should only be available when the client opts into experimental APIs.
+
+At runtime, clients must send `initialize` with `capabilities.experimentalApi = true` to use experimental methods or fields.
+
+1. Annotate the field in the protocol type (usually `app-server-protocol/src/protocol/v2.rs`) with:
+   ```rust
+   #[experimental("thread/start.myField")]
+   pub my_field: Option<String>,
+   ```
+2. Ensure the params type derives `ExperimentalApi` so field-level gating can be detected at runtime.
+
+3. In `app-server-protocol/src/protocol/common.rs`, keep the method stable and use `inspect_params: true` when only some fields are experimental (like `thread/start`). If the entire method is experimental, annotate the method variant with `#[experimental("method/name")]`.
+
+4. Regenerate protocol fixtures:
+
+   ```bash
+   just write-app-server-schema
+   # Include experimental API fields/methods in fixtures.
+   just write-app-server-schema --experimental
+   ```
+    
+5. Verify the protocol crate:
+
+   ```bash
+   cargo test -p codex-app-server-protocol
+   ```
