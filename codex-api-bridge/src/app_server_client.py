@@ -50,7 +50,7 @@ class AppServerClient:
         await self._initialize()
 
     async def _initialize(self):
-        """Send initialize handshake."""
+        """Send initialize handshake and authenticate."""
         response = await self._send_request("initialize", {
             "clientInfo": {
                 "name": "codex_api_bridge",
@@ -64,8 +64,20 @@ class AppServerClient:
 
         # Send initialized notification
         await self._send_notification("initialized", {})
-        self._initialized = True
         logger.info("App-server initialized")
+
+        # Authenticate with API key
+        if settings.openai_api_key:
+            auth_response = await self._send_request("account/login/start", {
+                "type": "apiKey",
+                "apiKey": settings.openai_api_key
+            })
+            if "error" in auth_response:
+                logger.error(f"Authentication failed: {auth_response['error']}")
+                raise RuntimeError(f"Failed to authenticate: {auth_response['error']}")
+            logger.info("Authenticated with API key")
+
+        self._initialized = True
 
     async def _send_request(
         self,

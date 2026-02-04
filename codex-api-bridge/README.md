@@ -90,44 +90,121 @@ The bridge spawns `codex app-server` as a subprocess and translates:
 
 ### Prerequisites
 
-- Python 3.11+
-- Codex binary built from `codex-rs/`
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| **Build tools** | - | C compiler, linker |
+| **Rust** | 1.85+ (nightly) | Build Codex binary |
+| **Python** | 3.11+ | Run API bridge |
+| **OpenAI API Key** | - | Authentication |
 
-### 1. Build Codex (if not already)
+### 1. Install Build Tools
 
+**Linux (Ubuntu/Debian):**
 ```bash
-cd ../codex-rs
-cargo build --release
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev cmake golang clang libclang-dev libc6-dev
+```
+
+**Linux (RHEL/CentOS/Fedora):**
+```bash
+sudo yum groupinstall -y "Development Tools"
+sudo yum install -y openssl-devel pkg-config cmake golang clang
+```
+
+**macOS:**
+```bash
+xcode-select --install
+brew install cmake go
+```
+
+**Windows:**
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with "Desktop development with C++".
+
+### 2. Install Rust
+
+**Linux/macOS:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup install nightly
+rustup default nightly
+```
+
+**Windows:**
+Download [rustup-init.exe](https://rustup.rs/), then:
+```powershell
+rustup install nightly
+rustup default nightly
+```
+
+Verify:
+```bash
+rustc --version
+cargo --version
+```
+
+### 3. Build Codex Binary
+
+**Debug build (faster, for testing):**
+```bash
+cd codex-rs
+cargo build -p codex-cli
+```
+
+**Release build (optimized, for production):**
+```bash
+cd codex-rs
+cargo build --release -p codex-cli
+```
+
+**Note:** If build fails due to memory, use single-threaded:
+```bash
+CARGO_BUILD_JOBS=1 cargo build -p codex-cli
 ```
 
 Binary location:
-- Linux/Mac: `codex-rs/target/release/codex`
-- Windows: `codex-rs/target/release/codex.exe`
+- **Debug:** `codex-rs/target/debug/codex`
+- **Release:** `codex-rs/target/release/codex`
+- **Windows:** Add `.exe` extension
 
-### 2. Install dependencies
-
-**With uv (fast):**
+Verify:
 ```bash
+./target/debug/codex --version
+# or
+./target/release/codex --version
+```
+
+### 4. Install Python Dependencies
+
+**Note:** You may need to install `venv` separately depending on your Python installation:
+```bash
+# Ubuntu/Debian
+sudo apt install python3-venv
+```
+
+**With uv (recommended):**
+```bash
+cd codex-api-bridge
 uv venv
 uv pip install -e .
 ```
 
 **With pip:**
 ```bash
-# Create venv
+cd codex-api-bridge
 python -m venv .venv
-
-# Activate (Windows PowerShell)
-.\.venv\Scripts\Activate.ps1
 
 # Activate (Linux/Mac)
 source .venv/bin/activate
+
+# Activate (Windows PowerShell)
+.\.venv\Scripts\Activate.ps1
 
 # Install
 pip install -e .
 ```
 
-### 3. Configure .env
+### 5. Configure .env
 
 ```bash
 cp .env.example .env
@@ -151,7 +228,7 @@ DEBUG=true
 LOG_LEVEL=INFO
 ```
 
-### 4. Run
+### 6. Run
 
 **Development (auto-reload):**
 ```bash
@@ -171,7 +248,7 @@ python -m src.main
 gunicorn src.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
 ```
 
-### 5. Verify
+### 7. Verify
 
 ```bash
 curl http://localhost:8000/status

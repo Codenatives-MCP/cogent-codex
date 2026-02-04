@@ -13,7 +13,31 @@ This document provides testing instructions for all API endpoints.
 | **Python** | 3.11+ | Run API bridge |
 | **OpenAI API Key** | - | Authentication for Codex |
 
-### 1. Install Rust (if not installed)
+### 1. Install Build Tools
+
+Rust requires a C compiler/linker for native dependencies.
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev cmake golang clang libclang-dev libc6-dev
+```
+
+**Linux (RHEL/CentOS/Fedora):**
+```bash
+sudo yum groupinstall -y "Development Tools"
+sudo yum install -y openssl-devel pkg-config
+```
+
+**macOS:**
+```bash
+xcode-select --install
+```
+
+**Windows:**
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and select "Desktop development with C++".
+
+### 2. Install Rust (if not installed)
 
 **Linux/macOS:**
 ```bash
@@ -36,23 +60,34 @@ rustc --version   # Should show 1.85+ or nightly
 cargo --version
 ```
 
-### 2. Build Codex Binary
+### 3. Build Codex Binary
 
+**Debug build (faster, recommended for testing):**
 ```bash
 cd codex-rs
-cargo build --release
+cargo build -p codex-cli
 ```
 
+**Release build (slower, optimized):**
+```bash
+cd codex-rs
+cargo build --release -p codex-cli
+```
+
+**Note:** Full workspace builds can be slow/memory-intensive. Using `-p codex-cli` builds only the CLI.
+
 Binary location:
-- **Linux/macOS:** `codex-rs/target/release/codex`
-- **Windows:** `codex-rs/target/release/codex.exe`
+- **Debug:** `codex-rs/target/debug/codex` (Linux/macOS) or `codex.exe` (Windows)
+- **Release:** `codex-rs/target/release/codex` (Linux/macOS) or `codex.exe` (Windows)
 
 Verify:
 ```bash
+./target/debug/codex --version
+# or
 ./target/release/codex --version
 ```
 
-### 3. Install Python Dependencies
+### 4. Install Python Dependencies
 
 ```bash
 cd codex-api-bridge
@@ -68,7 +103,7 @@ source .venv/bin/activate  # Linux/macOS
 pip install -e .
 ```
 
-### 4. Configure Environment
+### 5. Configure Environment
 
 ```bash
 cp .env.example .env
@@ -87,7 +122,7 @@ DEBUG=true
 LOG_LEVEL=INFO
 ```
 
-### 5. Start the Server
+### 6. Start the Server
 
 ```bash
 cd codex-api-bridge
