@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
 use crate::config_types::CollaborationMode;
+use crate::config_types::ModeKind;
 use crate::config_types::Personality;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::WindowsSandboxLevel;
@@ -22,6 +23,11 @@ use crate::dynamic_tools::DynamicToolCallRequest;
 use crate::dynamic_tools::DynamicToolResponse;
 use crate::dynamic_tools::DynamicToolSpec;
 use crate::items::TurnItem;
+use crate::mcp::CallToolResult;
+use crate::mcp::RequestId;
+use crate::mcp::Resource as McpResource;
+use crate::mcp::ResourceTemplate as McpResourceTemplate;
+use crate::mcp::Tool as McpTool;
 use crate::message_history::HistoryEntry;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
@@ -34,11 +40,6 @@ use crate::plan_tool::UpdatePlanArgs;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use mcp_types::CallToolResult;
-use mcp_types::RequestId;
-use mcp_types::Resource as McpResource;
-use mcp_types::ResourceTemplate as McpResourceTemplate;
-use mcp_types::Tool as McpTool;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -838,6 +839,7 @@ pub enum EventMsg {
     ItemCompleted(ItemCompletedEvent),
 
     AgentMessageContentDelta(AgentMessageContentDeltaEvent),
+    PlanDelta(PlanDeltaEvent),
     ReasoningContentDelta(ReasoningContentDeltaEvent),
     ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
 
@@ -1018,6 +1020,14 @@ impl HasLegacyEvent for AgentMessageContentDeltaEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct PlanDeltaEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct ReasoningContentDeltaEvent {
     pub thread_id: String,
     pub turn_id: String,
@@ -1107,6 +1117,8 @@ pub struct TurnCompleteEvent {
 pub struct TurnStartedEvent {
     // TODO(aibrahim): make this not optional
     pub model_context_window: Option<i64>,
+    #[serde(default)]
+    pub collaboration_mode_kind: ModeKind,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -1679,6 +1691,7 @@ impl From<CompactedItem> for ResponseItem {
                 text: value.message,
             }],
             end_turn: None,
+            phase: None,
         }
     }
 }
@@ -2457,6 +2470,7 @@ mod tests {
                 query: "find docs".into(),
                 action: WebSearchAction::Search {
                     query: Some("find docs".into()),
+                    queries: None,
                 },
             }),
         };

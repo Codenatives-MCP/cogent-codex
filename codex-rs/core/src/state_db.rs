@@ -9,6 +9,7 @@ use chrono::Timelike;
 use chrono::Utc;
 use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_state::DB_METRIC_COMPARE_ERROR;
@@ -33,12 +34,6 @@ pub(crate) async fn init_if_enabled(
 ) -> Option<StateDbHandle> {
     let state_path = config.codex_home.join(STATE_DB_FILENAME);
     if !config.features.enabled(Feature::Sqlite) {
-        // We delete the file on best effort basis to maintain retro-compatibility in the future.
-        let wal_path = state_path.with_extension("sqlite-wal");
-        let shm_path = state_path.with_extension("sqlite-shm");
-        for path in [state_path.as_path(), wal_path.as_path(), shm_path.as_path()] {
-            tokio::fs::remove_file(path).await.ok();
-        }
         return None;
     }
     let existed = tokio::fs::try_exists(&state_path).await.unwrap_or(false);
@@ -202,6 +197,37 @@ pub async fn find_rollout_path_by_id(
         })
 }
 
+/// Get dynamic tools for a thread id using SQLite.
+pub async fn get_dynamic_tools(
+    context: Option<&codex_state::StateRuntime>,
+    thread_id: ThreadId,
+    stage: &str,
+) -> Option<Vec<DynamicToolSpec>> {
+    let ctx = context?;
+    match ctx.get_dynamic_tools(thread_id).await {
+        Ok(tools) => tools,
+        Err(err) => {
+            warn!("state db get_dynamic_tools failed during {stage}: {err}");
+            None
+        }
+    }
+}
+
+/// Persist dynamic tools for a thread id using SQLite, if none exist yet.
+pub async fn persist_dynamic_tools(
+    context: Option<&codex_state::StateRuntime>,
+    thread_id: ThreadId,
+    tools: Option<&[DynamicToolSpec]>,
+    stage: &str,
+) {
+    let Some(ctx) = context else {
+        return;
+    };
+    if let Err(err) = ctx.persist_dynamic_tools(thread_id, tools).await {
+        warn!("state db persist_dynamic_tools failed during {stage}: {err}");
+    }
+}
+
 /// Reconcile rollout items into SQLite, falling back to scanning the rollout file.
 pub async fn reconcile_rollout(
     context: Option<&codex_state::StateRuntime>,
@@ -239,6 +265,21 @@ pub async fn reconcile_rollout(
     if let Err(err) = ctx.upsert_thread(&outcome.metadata).await {
         warn!(
             "state db reconcile_rollout upsert failed {}: {err}",
+            rollout_path.display()
+        );
+        return;
+    }
+    if let Ok(meta_line) = crate::rollout::list::read_session_meta_line(rollout_path).await {
+        persist_dynamic_tools(
+            Some(ctx),
+            meta_line.meta.id,
+            meta_line.meta.dynamic_tools.as_deref(),
+            "reconcile_rollout",
+        )
+        .await;
+    } else {
+        warn!(
+            "state db reconcile_rollout missing session meta {}",
             rollout_path.display()
         );
     }
@@ -283,7 +324,7 @@ pub async fn apply_rollout_items(
 pub fn record_discrepancy(stage: &str, reason: &str) {
     // We access the global metric because the call sites might not have access to the broader
     // OtelManager.
-    tracing::warn!("state db record_discrepancy: {stage}{reason}");
+    tracing::warn!("state db record_discrepancy: {stage}, {reason}");
     if let Some(metric) = codex_otel::metrics::global() {
         let _ = metric.counter(
             DB_METRIC_COMPARE_ERROR,

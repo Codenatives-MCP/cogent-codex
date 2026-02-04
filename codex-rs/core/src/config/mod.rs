@@ -18,11 +18,13 @@ use crate::config::types::ShellEnvironmentPolicyToml;
 use crate::config::types::SkillsConfig;
 use crate::config::types::Tui;
 use crate::config::types::UriBasedFileOpener;
+use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigRequirements;
 use crate::config_loader::LoaderOverrides;
 use crate::config_loader::McpServerIdentity;
 use crate::config_loader::McpServerRequirement;
+use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
 use crate::features::Feature;
@@ -30,9 +32,10 @@ use crate::features::FeatureOverrides;
 use crate::features::Features;
 use crate::features::FeaturesToml;
 use crate::git_info::resolve_root_git_project_for_trust;
+use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
-use crate::model_provider_info::OLLAMA_CHAT_PROVIDER_ID;
+use crate::model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use crate::model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crate::model_provider_info::built_in_model_providers;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
@@ -56,7 +59,6 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
-use dirs::home_dir;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -133,12 +135,17 @@ pub struct Config {
     pub model_provider: ModelProviderInfo,
 
     /// Optionally specify the personality of the model
-    pub model_personality: Option<Personality>,
+    pub personality: Option<Personality>,
 
     /// Approval policy for executing commands.
     pub approval_policy: Constrained<AskForApproval>,
 
     pub sandbox_policy: Constrained<SandboxPolicy>,
+
+    /// enforce_residency means web traffic cannot be routed outside of a
+    /// particular geography. HTTP clients should direct their requests
+    /// using backend-specific headers or URLs to enforce this.
+    pub enforce_residency: Constrained<Option<ResidencyRequirement>>,
 
     /// True if the user passed in an override or set a value in config.toml
     /// for either of approval_policy or sandbox_mode.
@@ -366,6 +373,7 @@ pub struct ConfigBuilder {
     cli_overrides: Option<Vec<(String, TomlValue)>>,
     harness_overrides: Option<ConfigOverrides>,
     loader_overrides: Option<LoaderOverrides>,
+    cloud_requirements: CloudRequirementsLoader,
     fallback_cwd: Option<PathBuf>,
 }
 
@@ -390,6 +398,11 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn cloud_requirements(mut self, cloud_requirements: CloudRequirementsLoader) -> Self {
+        self.cloud_requirements = cloud_requirements;
+        self
+    }
+
     pub fn fallback_cwd(mut self, fallback_cwd: Option<PathBuf>) -> Self {
         self.fallback_cwd = fallback_cwd;
         self
@@ -401,6 +414,7 @@ impl ConfigBuilder {
             cli_overrides,
             harness_overrides,
             loader_overrides,
+            cloud_requirements,
             fallback_cwd,
         } = self;
         let codex_home = codex_home.map_or_else(find_codex_home, std::io::Result::Ok)?;
@@ -413,9 +427,14 @@ impl ConfigBuilder {
             None => AbsolutePathBuf::current_dir()?,
         };
         harness_overrides.cwd = Some(cwd.to_path_buf());
-        let config_layer_stack =
-            load_config_layers_state(&codex_home, Some(cwd), &cli_overrides, loader_overrides)
-                .await?;
+        let config_layer_stack = load_config_layers_state(
+            &codex_home,
+            Some(cwd),
+            &cli_overrides,
+            loader_overrides,
+            cloud_requirements,
+        )
+        .await?;
         let merged_toml = config_layer_stack.effective_config();
 
         // Note that each layer in ConfigLayerStack should have resolved
@@ -511,6 +530,7 @@ pub async fn load_config_as_toml_with_cli_overrides(
         Some(cwd.clone()),
         &cli_overrides,
         LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
     )
     .await?;
 
@@ -609,9 +629,14 @@ pub async fn load_global_mcp_servers(
     // There is no cwd/project context for this query, so this will not include
     // MCP servers defined in in-repo .codex/ folders.
     let cwd: Option<AbsolutePathBuf> = None;
-    let config_layer_stack =
-        load_config_layers_state(codex_home, cwd, &cli_overrides, LoaderOverrides::default())
-            .await?;
+    let config_layer_stack = load_config_layers_state(
+        codex_home,
+        cwd,
+        &cli_overrides,
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+    )
+    .await?;
     let merged_toml = config_layer_stack.effective_config();
     let Some(servers_value) = merged_toml.get("mcp_servers") else {
         return Ok(BTreeMap::new());
@@ -733,14 +758,20 @@ pub fn set_project_trust_level(
 pub fn set_default_oss_provider(codex_home: &Path, provider: &str) -> std::io::Result<()> {
     // Validate that the provider is one of the known OSS providers
     match provider {
-        LMSTUDIO_OSS_PROVIDER_ID | OLLAMA_OSS_PROVIDER_ID | OLLAMA_CHAT_PROVIDER_ID => {
+        LMSTUDIO_OSS_PROVIDER_ID | OLLAMA_OSS_PROVIDER_ID => {
             // Valid provider, continue
+        }
+        LEGACY_OLLAMA_CHAT_PROVIDER_ID => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                OLLAMA_CHAT_PROVIDER_REMOVED_ERROR,
+            ));
         }
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Invalid OSS provider '{provider}'. Must be one of: {LMSTUDIO_OSS_PROVIDER_ID}, {OLLAMA_OSS_PROVIDER_ID}, {OLLAMA_CHAT_PROVIDER_ID}"
+                    "Invalid OSS provider '{provider}'. Must be one of: {LMSTUDIO_OSS_PROVIDER_ID}, {OLLAMA_OSS_PROVIDER_ID}"
                 ),
             ));
         }
@@ -888,9 +919,8 @@ pub struct ConfigToml {
     /// Override to force-enable reasoning summaries for the configured model.
     pub model_supports_reasoning_summaries: Option<bool>,
 
-    /// EXPERIMENTAL
     /// Optionally specify a personality for the model
-    pub model_personality: Option<Personality>,
+    pub personality: Option<Personality>,
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
@@ -962,7 +992,7 @@ pub struct ConfigToml {
     pub experimental_compact_prompt_file: Option<AbsolutePathBuf>,
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
-    /// Preferred OSS provider for local models, e.g. "lmstudio", "ollama", or "ollama-chat".
+    /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
 }
 
@@ -1169,7 +1199,7 @@ pub struct ConfigOverrides {
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub base_instructions: Option<String>,
     pub developer_instructions: Option<String>,
-    pub model_personality: Option<Personality>,
+    pub personality: Option<Personality>,
     pub compact_prompt: Option<String>,
     pub include_apply_patch_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
@@ -1227,10 +1257,14 @@ fn resolve_web_search_mode(
 
 pub(crate) fn resolve_web_search_mode_for_turn(
     explicit_mode: Option<WebSearchMode>,
+    is_azure_responses_endpoint: bool,
     sandbox_policy: &SandboxPolicy,
 ) -> WebSearchMode {
     if let Some(mode) = explicit_mode {
         return mode;
+    }
+    if is_azure_responses_endpoint {
+        return WebSearchMode::Disabled;
     }
     if matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
         WebSearchMode::Live
@@ -1272,7 +1306,7 @@ impl Config {
             codex_linux_sandbox_exe,
             base_instructions,
             developer_instructions,
-            model_personality,
+            personality,
             compact_prompt,
             include_apply_patch_tool: include_apply_patch_tool_override,
             show_raw_agent_reasoning,
@@ -1384,10 +1418,12 @@ impl Config {
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("Model provider `{model_provider_id}` not found"),
-                )
+                let message = if model_provider_id == LEGACY_OLLAMA_CHAT_PROVIDER_ID {
+                    OLLAMA_CHAT_PROVIDER_REMOVED_ERROR.to_string()
+                } else {
+                    format!("Model provider `{model_provider_id}` not found")
+                };
+                std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
 
@@ -1469,9 +1505,14 @@ impl Config {
             Self::try_read_non_empty_file(model_instructions_path, "model instructions file")?;
         let base_instructions = base_instructions.or(file_base_instructions);
         let developer_instructions = developer_instructions.or(cfg.developer_instructions);
-        let model_personality = model_personality
-            .or(config_profile.model_personality)
-            .or(cfg.model_personality);
+        let personality = personality
+            .or(config_profile.personality)
+            .or(cfg.personality)
+            .or_else(|| {
+                features
+                    .enabled(Feature::Personality)
+                    .then_some(Personality::Friendly)
+            });
 
         let experimental_compact_prompt_path = config_profile
             .experimental_compact_prompt_file
@@ -1493,6 +1534,8 @@ impl Config {
             approval_policy: mut constrained_approval_policy,
             sandbox_policy: mut constrained_sandbox_policy,
             mcp_servers,
+            exec_policy: _,
+            enforce_residency,
         } = requirements;
 
         constrained_approval_policy
@@ -1515,13 +1558,14 @@ impl Config {
             cwd: resolved_cwd,
             approval_policy: constrained_approval_policy,
             sandbox_policy: constrained_sandbox_policy,
+            enforce_residency,
             did_user_set_custom_approval_policy_or_sandbox_mode,
             forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
             base_instructions,
-            model_personality,
+            personality,
             developer_instructions,
             compact_prompt,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
@@ -1729,27 +1773,12 @@ fn toml_uses_deprecated_instructions_file(value: &TomlValue) -> bool {
 /// specified by the `CODEX_HOME` environment variable. If not set, defaults to
 /// `~/.codex`.
 ///
-/// - If `CODEX_HOME` is set, the value will be canonicalized and this
-///   function will Err if the path does not exist.
+/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
+///   value will be canonicalized and this function will Err otherwise.
 /// - If `CODEX_HOME` is not set, this function does not verify that the
 ///   directory exists.
 pub fn find_codex_home() -> std::io::Result<PathBuf> {
-    // Honor the `CODEX_HOME` environment variable when it is set to allow users
-    // (and tests) to override the default location.
-    if let Ok(val) = std::env::var("CODEX_HOME")
-        && !val.is_empty()
-    {
-        return PathBuf::from(val).canonicalize();
-    }
-
-    let mut p = home_dir().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Could not find home directory",
-        )
-    })?;
-    p.push(".codex");
-    Ok(p)
+    codex_utils_home_dir::find_codex_home()
 }
 
 /// Returns the path to the folder where Codex logs are stored. Does not verify
@@ -2327,14 +2356,14 @@ trust_level = "trusted"
 
     #[test]
     fn web_search_mode_for_turn_defaults_to_cached_when_unset() {
-        let mode = resolve_web_search_mode_for_turn(None, &SandboxPolicy::ReadOnly);
+        let mode = resolve_web_search_mode_for_turn(None, false, &SandboxPolicy::ReadOnly);
 
         assert_eq!(mode, WebSearchMode::Cached);
     }
 
     #[test]
     fn web_search_mode_for_turn_defaults_to_live_for_danger_full_access() {
-        let mode = resolve_web_search_mode_for_turn(None, &SandboxPolicy::DangerFullAccess);
+        let mode = resolve_web_search_mode_for_turn(None, false, &SandboxPolicy::DangerFullAccess);
 
         assert_eq!(mode, WebSearchMode::Live);
     }
@@ -2343,10 +2372,18 @@ trust_level = "trusted"
     fn web_search_mode_for_turn_prefers_explicit_value() {
         let mode = resolve_web_search_mode_for_turn(
             Some(WebSearchMode::Cached),
+            false,
             &SandboxPolicy::DangerFullAccess,
         );
 
         assert_eq!(mode, WebSearchMode::Cached);
+    }
+
+    #[test]
+    fn web_search_mode_for_turn_disables_for_azure_responses_endpoint() {
+        let mode = resolve_web_search_mode_for_turn(None, true, &SandboxPolicy::DangerFullAccess);
+
+        assert_eq!(mode, WebSearchMode::Disabled);
     }
 
     #[test]
@@ -2611,8 +2648,14 @@ profile = "project"
         };
 
         let cwd = AbsolutePathBuf::try_from(codex_home.path())?;
-        let config_layer_stack =
-            load_config_layers_state(codex_home.path(), Some(cwd), &Vec::new(), overrides).await?;
+        let config_layer_stack = load_config_layers_state(
+            codex_home.path(),
+            Some(cwd),
+            &Vec::new(),
+            overrides,
+            CloudRequirementsLoader::default(),
+        )
+        .await?;
         let cfg = deserialize_config_toml_with_base(
             config_layer_stack.effective_config(),
             codex_home.path(),
@@ -2739,6 +2782,7 @@ profile = "project"
             Some(cwd),
             &[("model".to_string(), TomlValue::String("cli".to_string()))],
             overrides,
+            CloudRequirementsLoader::default(),
         )
         .await?;
 
@@ -3541,7 +3585,7 @@ model = "gpt-5.1-codex"
         cfg: ConfigToml,
         model_provider_map: HashMap<String, ModelProviderInfo>,
         openai_provider: ModelProviderInfo,
-        openai_chat_completions_provider: ModelProviderInfo,
+        openai_custom_provider: ModelProviderInfo,
     }
 
     impl PrecedenceTestFixture {
@@ -3623,11 +3667,11 @@ profile = "gpt3"
 [analytics]
 enabled = true
 
-[model_providers.openai-chat-completions]
-name = "OpenAI using Chat Completions"
+[model_providers.openai-custom]
+name = "OpenAI custom"
 base_url = "https://api.openai.com/v1"
 env_key = "OPENAI_API_KEY"
-wire_api = "chat"
+wire_api = "responses"
 request_max_retries = 4            # retry failed HTTP requests
 stream_max_retries = 10            # retry dropped SSE streams
 stream_idle_timeout_ms = 300000    # 5m idle timeout
@@ -3641,7 +3685,7 @@ model_reasoning_summary = "detailed"
 
 [profiles.gpt3]
 model = "gpt-3.5-turbo"
-model_provider = "openai-chat-completions"
+model_provider = "openai-custom"
 
 [profiles.zdr]
 model = "o3"
@@ -3672,11 +3716,11 @@ model_verbosity = "high"
 
         let codex_home_temp_dir = TempDir::new().unwrap();
 
-        let openai_chat_completions_provider = ModelProviderInfo {
-            name: "OpenAI using Chat Completions".to_string(),
+        let openai_custom_provider = ModelProviderInfo {
+            name: "OpenAI custom".to_string(),
             base_url: Some("https://api.openai.com/v1".to_string()),
             env_key: Some("OPENAI_API_KEY".to_string()),
-            wire_api: crate::WireApi::Chat,
+            wire_api: crate::WireApi::Responses,
             env_key_instructions: None,
             experimental_bearer_token: None,
             query_params: None,
@@ -3690,10 +3734,7 @@ model_verbosity = "high"
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();
-            model_provider_map.insert(
-                "openai-chat-completions".to_string(),
-                openai_chat_completions_provider.clone(),
-            );
+            model_provider_map.insert("openai-custom".to_string(), openai_custom_provider.clone());
             model_provider_map
         };
 
@@ -3708,7 +3749,7 @@ model_verbosity = "high"
             cfg,
             model_provider_map,
             openai_provider,
-            openai_chat_completions_provider,
+            openai_custom_provider,
         })
     }
 
@@ -3748,6 +3789,7 @@ model_verbosity = "high"
                 model_provider: fixture.openai_provider.clone(),
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                enforce_residency: Constrained::allow_any(None),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -3775,7 +3817,7 @@ model_verbosity = "high"
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_supports_reasoning_summaries: None,
                 model_verbosity: None,
-                model_personality: None,
+                personality: Some(Personality::Friendly),
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 base_instructions: None,
                 developer_instructions: None,
@@ -3828,10 +3870,11 @@ model_verbosity = "high"
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
-            model_provider_id: "openai-chat-completions".to_string(),
-            model_provider: fixture.openai_chat_completions_provider.clone(),
+            model_provider_id: "openai-custom".to_string(),
+            model_provider: fixture.openai_custom_provider.clone(),
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+            enforce_residency: Constrained::allow_any(None),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -3859,7 +3902,7 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::default(),
             model_supports_reasoning_summaries: None,
             model_verbosity: None,
-            model_personality: None,
+            personality: Some(Personality::Friendly),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
@@ -3931,6 +3974,7 @@ model_verbosity = "high"
             model_provider: fixture.openai_provider.clone(),
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+            enforce_residency: Constrained::allow_any(None),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -3958,7 +4002,7 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::default(),
             model_supports_reasoning_summaries: None,
             model_verbosity: None,
-            model_personality: None,
+            personality: Some(Personality::Friendly),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
@@ -4016,6 +4060,7 @@ model_verbosity = "high"
             model_provider: fixture.openai_provider.clone(),
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+            enforce_residency: Constrained::allow_any(None),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -4043,7 +4088,7 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::Detailed,
             model_supports_reasoning_summaries: None,
             model_verbosity: Some(Verbosity::High),
-            model_personality: None,
+            personality: Some(Personality::Friendly),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
@@ -4223,6 +4268,50 @@ trust_level = "trusted"
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("Invalid OSS provider"));
         assert!(error.to_string().contains("invalid_provider"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_default_oss_provider_rejects_legacy_ollama_chat_provider() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let codex_home = temp_dir.path();
+
+        let result = set_default_oss_provider(codex_home, LEGACY_OLLAMA_CHAT_PROVIDER_ID);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_config_rejects_legacy_ollama_chat_provider_with_helpful_error()
+    -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            model_provider: Some(LEGACY_OLLAMA_CHAT_PROVIDER_ID.to_string()),
+            ..Default::default()
+        };
+
+        let result = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        );
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            error
+                .to_string()
+                .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR)
+        );
 
         Ok(())
     }
