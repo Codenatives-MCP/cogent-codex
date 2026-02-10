@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     # Security settings
     security_method: Optional[str] = None  # None | "Keycloak"
+    allow_user_id_override: bool = False  # Allow user_id via query param / header (testing)
 
     # Keycloak settings
     keycloak_base_url: Optional[str] = None

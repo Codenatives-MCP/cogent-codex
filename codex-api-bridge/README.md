@@ -92,6 +92,7 @@ The bridge manages per-user `codex app-server` subprocesses via the `SessionMana
 | `MAX_SESSIONS` | No | 50 | Maximum concurrent user sessions |
 | `IDLE_TIMEOUT_SECONDS` | No | 300 | Seconds before idle sessions are cleaned up |
 | `CLEANUP_INTERVAL_SECONDS` | No | 60 | Interval between cleanup sweeps |
+| `ALLOW_USER_ID_OVERRIDE` | No | false | Allow user_id via query param / header (testing) |
 
 ## Security (Keycloak)
 

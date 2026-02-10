@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 def get_user_id(request: Request) -> str:
     """Extract user_id from authenticated request.
 
-    Returns 'default' when authentication is disabled.
+    Resolution order:
+    1. Keycloak JWT 'sub' claim (always wins when auth is active)
+    2. Query param ?user_id= or X-User-Id header (when ALLOW_USER_ID_OVERRIDE=true)
+    3. 'default'
     """
     auth = getattr(request.state, "auth", None)
     if auth and auth.get("sub"):
@@ -56,6 +59,10 @@ def get_user_id(request: Request) -> str:
             "Keycloak auth active but no 'sub' claim found in token for %s",
             request.url.path,
         )
+    if settings.allow_user_id_override:
+        uid = request.query_params.get("user_id") or request.headers.get("X-User-Id")
+        if uid and uid.strip():
+            return uid.strip()
     return "default"
 
 
