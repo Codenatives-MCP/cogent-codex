@@ -10,6 +10,17 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings from environment variables."""
 
+    # Security settings
+    security_method: Optional[str] = None  # None | "Keycloak"
+
+    # Keycloak settings
+    keycloak_base_url: Optional[str] = None
+    keycloak_realm: Optional[str] = None
+    keycloak_client_id: Optional[str] = None
+    keycloak_client_secret: Optional[str] = None
+    keycloak_introspection_url: Optional[str] = None
+    keycloak_timeout_seconds: int = 5
+
     # OpenAI API Key (required for Codex)
     openai_api_key: Optional[str] = None
 
@@ -57,6 +68,15 @@ class Settings(BaseSettings):
         if self.openai_api_key:
             env["OPENAI_API_KEY"] = self.openai_api_key
         return env
+
+    def get_keycloak_introspection_url(self) -> str:
+        """Get Keycloak token introspection URL."""
+        if self.keycloak_introspection_url:
+            return self.keycloak_introspection_url
+        if not self.keycloak_base_url or not self.keycloak_realm:
+            raise RuntimeError("Keycloak base URL or realm not configured.")
+        base = self.keycloak_base_url.rstrip("/")
+        return f"{base}/realms/{self.keycloak_realm}/protocol/openid-connect/token/introspect"
 
 
 settings = Settings()

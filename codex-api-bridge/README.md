@@ -86,6 +86,26 @@ The bridge spawns `codex app-server` as a subprocess and translates:
 | `DEBUG` | No | false | Enable auto-reload |
 | `LOG_LEVEL` | No | INFO | Logging level |
 
+## Security (Keycloak)
+
+Set `SECURITY_METHOD=Keycloak` to enforce authentication via Keycloak token introspection.
+Set `SECURITY_METHOD=None` (default) to disable authentication.
+
+Required env vars when `SECURITY_METHOD=Keycloak`:
+- `KEYCLOAK_BASE_URL`
+- `KEYCLOAK_REALM`
+- `KEYCLOAK_CLIENT_ID`
+- `KEYCLOAK_CLIENT_SECRET`
+
+Optional:
+- `KEYCLOAK_INTROSPECTION_URL`
+- `KEYCLOAK_TIMEOUT_SECONDS`
+
+Example:
+```bash
+curl -H "Authorization: Bearer <access_token>" http://localhost:8000/threads
+```
+
 ## Detailed Setup
 
 ### Prerequisites

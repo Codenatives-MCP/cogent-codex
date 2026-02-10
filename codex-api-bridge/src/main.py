@@ -14,11 +14,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
+from .keycloak_auth import KeycloakIntrospectionError, introspect_token
 from .models import (
     ChatRequest,
     StatusResponse,
@@ -37,6 +39,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class KeycloakAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if settings.security_method is None or settings.security_method == "None":
+            return await call_next(request)
+
+        if settings.security_method != "Keycloak":
+            return await call_next(request)
+
+        if request.url.path in ("/", "/status"):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            logger.warning("Missing or invalid Authorization header: %s", request.url.path)
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        token = auth_header.removeprefix("Bearer ").strip()
+        if not token:
+            logger.warning("Empty bearer token: %s", request.url.path)
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        try:
+            data = await introspect_token(token)
+        except KeycloakIntrospectionError:
+            logger.warning("Keycloak introspection failed: %s", request.url.path)
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        if not data.get("active"):
+            logger.warning("Inactive token: %s", request.url.path)
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        request.state.auth = {
+            "sub": data.get("sub"),
+            "username": data.get("username"),
+            "scope": data.get("scope"),
+            "exp": data.get("exp"),
+            "raw": data,
+        }
+
+        subject = data.get("sub") or data.get("username")
+        logger.info("Authenticated request: %s", subject or "unknown")
+
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown."""
@@ -47,6 +94,19 @@ async def lifespan(app: FastAPI):
         logger.info("OpenAI API key: configured")
     else:
         logger.warning("OPENAI_API_KEY not set!")
+
+    if settings.security_method == "Keycloak":
+        if not settings.keycloak_base_url or not settings.keycloak_realm:
+            logger.warning("Keycloak base URL or realm not configured.")
+        if not settings.keycloak_client_id or not settings.keycloak_client_secret:
+            logger.warning("Keycloak client credentials not configured.")
+        if (
+            not settings.keycloak_base_url
+            or not settings.keycloak_realm
+            or not settings.keycloak_client_id
+            or not settings.keycloak_client_secret
+        ):
+            logger.warning("Keycloak is not fully configured; authentication will fail.")
 
     available, version = client.check_availability()
     if available:
@@ -67,6 +127,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(KeycloakAuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
