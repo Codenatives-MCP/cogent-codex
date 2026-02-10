@@ -298,12 +298,11 @@ async def get_history(
 
     except RuntimeError as e:
         error_msg = str(e)
-        if "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail=f"Thread not found: {thread_id}")
         if "Maximum concurrent sessions" in error_msg:
             raise HTTPException(status_code=503, detail=error_msg)
-        logger.exception("Failed to get history: %s", e)
-        raise HTTPException(status_code=500, detail=error_msg)
+        # Default to 404 for thread operations (covers "not found", "not loaded", etc.)
+        logger.warning("Thread error (user=%s, thread=%s): %s", user_id, thread_id, e)
+        raise HTTPException(status_code=404, detail=f"Thread not found: {thread_id}")
 
     except Exception as e:
         logger.exception("Failed to get history: %s", e)
@@ -373,9 +372,10 @@ async def chat(request: Request, body: ChatRequest):
                 if not thread_id:
                     raise HTTPException(status_code=500, detail="Failed to resume thread")
             except RuntimeError as e:
-                if "not found" in str(e).lower():
-                    raise HTTPException(status_code=404, detail=f"Thread not found: {body.thread_id}")
-                raise
+                if "Maximum concurrent sessions" in str(e):
+                    raise
+                # Default to 404 for thread resume errors
+                raise HTTPException(status_code=404, detail=f"Thread not found: {body.thread_id}")
         else:
             logger.debug("Creating new thread")
             result = await user_client.thread_start(model=body.model)
