@@ -257,7 +257,6 @@ def build_reasoning_end(reasoning_id: str, conclusion: str, success: bool) -> Di
         "conclusion": conclusion,
         "confidence": 0.9 if success else 0.0,
         "success": success,
-        "total_steps": 1,
         "timestamp": _ts(),
     }
 
@@ -287,8 +286,29 @@ def build_agui_message(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if item_type in TOOL_ITEM_TYPES:
+        tool_call_id = extract_tool_call_id(item)
+        tool_name = normalize_tool_name(item)
+        args = _extract_tool_args(item)
         result = _extract_tool_result(item)
-        return {"id": item_id, "role": "tool", "content": build_content_object(result).dict()}
+        return [
+            {
+                "id": _uuid(),
+                "role": "assistant",
+                "content": build_content_object("").dict(),
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": args},
+                }],
+            },
+            {
+                "id": _uuid(),
+                "role": "tool",
+                "content": build_content_object(result).dict(),
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+            },
+        ]
 
     if item_type in DROPPED_ITEM_TYPES:
         return None
@@ -470,7 +490,10 @@ def build_agui_response(events: List[Dict[str, Any]], thread_id: str, user_id: s
             result = build_agui_message(item)
             if result is None:
                 continue
-            messages.append(result)
+            if isinstance(result, list):
+                messages.extend(result)
+            else:
+                messages.append(result)
         if event.get("method") == "turn/completed":
             turn = event.get("params", {}).get("turn", {})
             if turn.get("status") == "failed":

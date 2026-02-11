@@ -69,3 +69,20 @@ class HistoryResponse(BaseModel):
     project_id: Optional[str] = None
     project_name: Optional[str] = None
     usage_metadata: Optional[Dict[str, Any]] = None
+
+
+class AGUIThreadInfo(BaseModel):
+    thread_id: str
+    chat_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    message_count: int = 0
+    last_message_preview: Optional[str] = None
+    agent_type: str = "codex"
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+
+
+class AGUIThreadsResponse(BaseModel):
+    threads: List[AGUIThreadInfo]
+    total_count: int

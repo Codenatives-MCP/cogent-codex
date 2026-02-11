@@ -22,7 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
 from .keycloak_auth import KeycloakIntrospectionError, introspect_token
-from .agui_models import HistoryResponse
+from .agui_models import AGUIThreadInfo, AGUIThreadsResponse, HistoryResponse
 from .agui_translate import (
     build_agui_response,
     build_done_delta,
@@ -34,8 +34,6 @@ from .agui_translate import (
 from .models import (
     ChatRequest,
     StatusResponse,
-    ThreadInfo,
-    ThreadsResponse,
 )
 from .session_manager import session_manager
 from .user_store import close_users_collection, init_users_collection, verify_user_identity
@@ -275,7 +273,7 @@ async def get_status():
     )
 
 
-@app.get("/threads", response_model=ThreadsResponse)
+@app.get("/threads", response_model=AGUIThreadsResponse)
 async def list_threads(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
@@ -291,16 +289,21 @@ async def list_threads(
 
         threads = []
         for item in result.get("data", []):
-            threads.append(ThreadInfo(
+            threads.append(AGUIThreadInfo(
                 thread_id=item.get("id", ""),
-                preview=item.get("preview"),
+                chat_name=item.get("preview"),
                 created_at=datetime.fromtimestamp(item["createdAt"]) if item.get("createdAt") else None,
                 updated_at=datetime.fromtimestamp(item["updatedAt"]) if item.get("updatedAt") else None,
+                message_count=0,
+                last_message_preview=item.get("preview"),
+                agent_type="codex",
+                project_id=None,
+                project_name=None,
             ))
 
-        return ThreadsResponse(
+        return AGUIThreadsResponse(
             threads=threads,
-            next_cursor=result.get("nextCursor"),
+            total_count=len(threads),
         )
 
     except RuntimeError as e:
@@ -414,7 +417,8 @@ async def chat(request: Request, body: ChatRequest):
                 raise HTTPException(status_code=404, detail=f"Thread not found: {body.thread_id}")
         else:
             logger.debug("Creating new thread")
-            result = await user_client.thread_start(model=body.model)
+            # NOTE: model override intentionally ignored for now.
+            result = await user_client.thread_start()
             thread_id = result.get("thread", {}).get("id")
             if not thread_id:
                 raise HTTPException(status_code=500, detail="Failed to create thread")
@@ -422,7 +426,8 @@ async def chat(request: Request, body: ChatRequest):
 
         if body.stream:
             return StreamingResponse(
-                sse_stream(user_client, thread_id, prompt, body.model),
+                # NOTE: model override intentionally ignored for now.
+                sse_stream(user_client, thread_id, prompt, None),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -432,7 +437,8 @@ async def chat(request: Request, body: ChatRequest):
             )
         else:
             events = []
-            async for event in user_client.turn_start_stream(thread_id, prompt, body.model):
+            # NOTE: model override intentionally ignored for now.
+            async for event in user_client.turn_start_stream(thread_id, prompt, None):
                 events.append(event)
             return build_agui_response(events, thread_id, user_id)
 
