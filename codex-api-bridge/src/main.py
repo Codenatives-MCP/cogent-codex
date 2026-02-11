@@ -385,7 +385,7 @@ async def sse_stream(
 
 
 @app.post("/chat")
-async def chat(request: Request, body: ChatRequest):
+async def chat(request: Request, body: ChatRequest, _auth: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)):
     """
     Send a message and get response.
 
