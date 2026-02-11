@@ -53,6 +53,14 @@ def build_error_delta(response_id: str, message: str) -> Dict[str, Any]:
     }
 
 
+def build_usage_metadata_delta(response_id: str, usage_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "delta",
+        "response_id": response_id,
+        "content": {"usage_metadata": usage_metadata},
+    }
+
+
 # -----------------------------------------------------------------------------
 # Tool classification and normalization
 # -----------------------------------------------------------------------------
@@ -415,6 +423,10 @@ def translate_event(
         msg = params.get("error", {}).get("message", "Unknown error")
         return [build_error_delta(response_id, msg)]
 
+    # Token usage updates
+    if method == "thread/tokenUsage/updated":
+        return [build_usage_metadata_delta(response_id, params)]
+
     # Turn completed
     if method == "turn/completed":
         turn = params.get("turn", {})
@@ -428,7 +440,6 @@ def translate_event(
 
     # Explicitly ignored
     if method in (
-        "thread/tokenUsage/updated",
         "turn/diff/updated",
         "turn/plan/updated",
         "thread/name/updated",
