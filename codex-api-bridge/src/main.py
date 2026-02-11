@@ -15,9 +15,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
@@ -45,6 +46,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # =============================================================================
@@ -276,8 +278,10 @@ async def get_status():
 @app.get("/threads", response_model=AGUIThreadsResponse)
 async def list_threads(
     request: Request,
+    user_id: Optional[str] = Query(default=None, description="User ID"),
     limit: int = Query(default=50, ge=1, le=200),
     cursor: Optional[str] = Query(default=None),
+    _auth: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ):
     """List all conversation threads for the authenticated user."""
     user_id = await get_user_id(request)
@@ -321,6 +325,8 @@ async def list_threads(
 async def get_history(
     request: Request,
     thread_id: str = Query(..., description="Thread ID"),
+    user_id: Optional[str] = Query(default=None, description="User ID"),
+    _auth: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ):
     """Get conversation history for a thread."""
     user_id = await get_user_id(request)
