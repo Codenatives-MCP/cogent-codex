@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 
+from bson.errors import InvalidId
 from bson.objectid import ObjectId
 from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -48,8 +49,16 @@ async def verify_user_identity(keycloak_id: str, requested_user_id: str) -> None
         )
 
     try:
+        object_id = ObjectId(requested_user_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Error: Invalid user_id format",
+        )
+
+    try:
         user_doc = await _users_collection.find_one(
-            {"keycloak_id": keycloak_id, "_id": ObjectId(requested_user_id)}
+            {"keycloak_id": keycloak_id, "_id": object_id}
         )
     except Exception as exc:
         logger.warning("User lookup failed: %s", exc)
