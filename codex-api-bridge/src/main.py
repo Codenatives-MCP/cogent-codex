@@ -10,6 +10,7 @@ Minimal implementation with 4 core features:
 import json
 import logging
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncIterator, Optional
@@ -21,10 +22,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
 from .keycloak_auth import KeycloakIntrospectionError, introspect_token
+from .agui_models import HistoryResponse
+from .agui_translate import (
+    build_agui_response,
+    build_done_delta,
+    build_error_delta,
+    build_history_response,
+    build_initial_delta,
+    translate_event,
+)
 from .models import (
     ChatRequest,
     StatusResponse,
-    ThreadHistoryResponse,
     ThreadInfo,
     ThreadsResponse,
 )
@@ -305,7 +314,7 @@ async def list_threads(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/history", response_model=ThreadHistoryResponse)
+@app.get("/history", response_model=HistoryResponse)
 async def get_history(
     request: Request,
     thread_id: str = Query(..., description="Thread ID"),
@@ -319,12 +328,7 @@ async def get_history(
         result = await user_client.thread_read(thread_id)
         thread = result.get("thread", {})
 
-        return ThreadHistoryResponse(
-            thread_id=thread.get("id", thread_id),
-            preview=thread.get("preview"),
-            turns=thread.get("turns", []),
-            created_at=datetime.fromtimestamp(thread["createdAt"]) if thread.get("createdAt") else None,
-        )
+        return build_history_response(thread, thread_id, user_id)
 
     except RuntimeError as e:
         error_msg = str(e)
@@ -346,24 +350,29 @@ async def sse_stream(
     model: Optional[str],
 ) -> AsyncIterator[str]:
     """Generate SSE events from turn."""
+    response_id = str(uuid.uuid4())
+    reasoning_id = str(uuid.uuid4())
+    state = {"reasoning_started": False}
+    stream_done = False
     try:
         # Always send thread_id first so client knows which thread they're on
-        yield f"data: {json.dumps({'type': 'session', 'thread_id': thread_id})}\n\n"
+        yield f"data: {json.dumps(build_initial_delta(thread_id, response_id))}\n\n"
 
         async for event in user_client.turn_start_stream(thread_id, prompt, model):
-            yield f"data: {json.dumps(event)}\n\n"
-
-            # Stop on completion or error
-            method = event.get("method", event.get("type", ""))
-            if method in ("turn/completed", "error"):
+            for ag_event in translate_event(event, response_id, reasoning_id, state):
+                yield f"data: {json.dumps(ag_event)}\n\n"
+                if ag_event.get("type") == "done":
+                    stream_done = True
+            if stream_done:
                 break
 
-        yield "data: [DONE]\n\n"
+        if not stream_done:
+            yield f"data: {json.dumps(build_done_delta(response_id))}\n\n"
 
     except Exception as e:
         logger.exception("Stream error: %s", e)
-        yield f"data: {json.dumps({'type': 'error', 'thread_id': thread_id, 'message': str(e)})}\n\n"
-        yield "data: [DONE]\n\n"
+        yield f"data: {json.dumps(build_error_delta(response_id, str(e)))}\n\n"
+        yield f"data: {json.dumps(build_done_delta(response_id))}\n\n"
 
 
 @app.post("/chat")
@@ -423,20 +432,9 @@ async def chat(request: Request, body: ChatRequest):
             )
         else:
             events = []
-            final_message = None
-
             async for event in user_client.turn_start_stream(thread_id, prompt, body.model):
                 events.append(event)
-                if event.get("method") == "item/completed":
-                    item = event.get("params", {}).get("item", {})
-                    if item.get("type") == "agentMessage":
-                        final_message = item.get("text", "")
-
-            return {
-                "thread_id": thread_id,
-                "message": final_message,
-                "events": events,
-            }
+            return build_agui_response(events, thread_id, user_id)
 
     except HTTPException:
         raise

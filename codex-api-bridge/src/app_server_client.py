@@ -173,7 +173,8 @@ class AppServerClient:
         await self._ensure_connected()
 
         response = await self._send_request("thread/resume", {
-            "threadId": thread_id
+            "threadId": thread_id,
+            "approvalPolicy": "never",
         })
 
         if "error" in response:
