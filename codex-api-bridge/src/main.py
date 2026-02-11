@@ -16,7 +16,7 @@ from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
@@ -81,25 +81,27 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in ("/", "/status"):
             return await call_next(request)
 
+        unauthorized = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             logger.warning("Missing or invalid Authorization header: %s", request.url.path)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            return unauthorized
 
         token = auth_header.removeprefix("Bearer ").strip()
         if not token:
             logger.warning("Empty bearer token: %s", request.url.path)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            return unauthorized
 
         try:
             data = await introspect_token(token)
         except KeycloakIntrospectionError:
             logger.warning("Keycloak introspection failed: %s", request.url.path)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            return unauthorized
 
         if not data.get("active"):
             logger.warning("Inactive token: %s", request.url.path)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            return unauthorized
 
         request.state.auth = {
             "sub": data.get("sub"),
